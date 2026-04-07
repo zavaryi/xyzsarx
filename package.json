@@ -1,0 +1,16 @@
+{
+  "name": "discord-rpc-bot",
+  "version": "1.0.0",
+  "description": "24/7 Discord Custom Rich Presence selfbot with Railway deployment support",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "discord.js-selfbot-v13": "^3.3.2",
+    "express": "^4.18.2"
+  }
+}
