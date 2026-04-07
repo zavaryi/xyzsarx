@@ -1,37 +1,19 @@
 const { Client, RichPresence } = require('discord.js-selfbot-v13');
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
 
 const TOKEN = process.env.TOKEN;
 const APPLICATION_ID = process.env.APPLICATION_ID || null;
 const PORT = process.env.PORT || 3000;
-const START_TIME_FILE = path.join(__dirname, '.start_time');
 
 if (!TOKEN) {
   console.error('[ERROR] TOKEN is not set. Exiting.');
   process.exit(1);
 }
 
-const INITIAL_OFFSET_MS = ((376 * 3600) + (45 * 60) + 32) * 1000;
-
-function getStartTimestamp() {
-  try {
-    if (fs.existsSync(START_TIME_FILE)) {
-      const saved = parseInt(fs.readFileSync(START_TIME_FILE, 'utf8').trim(), 10);
-      if (!isNaN(saved) && saved > 0) {
-        console.log('[Timer] Resumed — showing elapsed from:', new Date(saved).toISOString());
-        return saved;
-      }
-    }
-  } catch (_) {}
-  const backdated = Date.now() - INITIAL_OFFSET_MS;
-  try { fs.writeFileSync(START_TIME_FILE, String(backdated)); } catch (_) {}
-  console.log('[Timer] First run — backdated so Discord shows 376:45:32');
-  return backdated;
-}
-
-const START_TIMESTAMP = getStartTimestamp();
+// Fixed start point — hardcoded so the timer survives every restart/redeploy.
+// This was the original backdated start logged on first Replit run.
+// Discord shows elapsed = now - START_TIMESTAMP, counting up 1s per second automatically.
+const START_TIMESTAMP = new Date('2026-03-22T16:15:20.642Z').getTime();
 
 const config = {
   activityName: 'ego',
@@ -54,7 +36,13 @@ const FALLBACK_APP_IDS = [
 ].filter(Boolean);
 
 const app = express();
-app.get('/', (_req, res) => res.json({ status: 'alive', uptime: Math.floor(process.uptime()), timer_from: new Date(START_TIMESTAMP).toISOString() }));
+app.get('/', (_req, res) => {
+  const elapsedMs = Date.now() - START_TIMESTAMP;
+  const hours = Math.floor(elapsedMs / 3600000);
+  const mins = Math.floor((elapsedMs % 3600000) / 60000);
+  const secs = Math.floor((elapsedMs % 60000) / 1000);
+  res.json({ status: 'alive', uptime: Math.floor(process.uptime()), elapsed: `${hours}:${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}` });
+});
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 app.listen(PORT, () => console.log(`[HTTP] Health server on port ${PORT}`));
 
@@ -78,7 +66,7 @@ async function tryResolveImage() {
       console.log(`[Image] appId ${appId} failed: ${err.message}`);
     }
   }
-  console.log('[Image] ✗ Could not resolve. Set APPLICATION_ID env var for reliable image + button support.');
+  console.log('[Image] ✗ Could not resolve image.');
   return { image: null, appId: FALLBACK_APP_IDS[0] || null };
 }
 
@@ -97,22 +85,17 @@ async function sendPresence() {
     .addButton(config.buttonLabel, config.buttonUrl)
     .addButton(config.buttonLabel, config.buttonUrl);
 
-  if (appId) {
-    rpc.setApplicationId(appId);
-  }
-
-  if (image) {
-    rpc.setAssetsLargeImage(image);
-  }
+  if (appId) rpc.setApplicationId(appId);
+  if (image) rpc.setAssetsLargeImage(image);
 
   try {
-    client.user.setPresence({
-      activities: [rpc],
-      status: config.status,
-    });
+    client.user.setPresence({ activities: [rpc], status: config.status });
     client.user.setStatus(config.status);
-    console.log(`[RPC] ✓ Set | appId: ${appId} | image: ${image ? 'yes' : 'no'} | buttons → ${config.buttonUrl}`);
-    console.log('[RPC] NOTE: Buttons only work when clicked from ANOTHER account (Discord limitation for self-view).');
+    const elapsedMs = Date.now() - START_TIMESTAMP;
+    const h = Math.floor(elapsedMs / 3600000);
+    const m = Math.floor((elapsedMs % 3600000) / 60000);
+    const s = Math.floor((elapsedMs % 60000) / 1000);
+    console.log(`[RPC] ✓ Set — elapsed: ${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')} | appId: ${appId} | image: ${image ? 'yes' : 'no'}`);
   } catch (err) {
     console.error('[RPC] Builder error, falling back to raw WS:', err.message);
     sendRawFallback(appId, image);
@@ -130,12 +113,8 @@ function sendRawFallback(appId, image) {
     buttons: [config.buttonLabel, config.buttonLabel],
     metadata: { button_urls: [config.buttonUrl, config.buttonUrl] },
   };
-  if (appId) {
-    activity.application_id = appId;
-  }
-  if (image) {
-    activity.assets = { large_image: image };
-  }
+  if (appId) activity.application_id = appId;
+  if (image) activity.assets = { large_image: image };
   client.ws.broadcast({ op: 3, d: { since: null, afk: false, status: config.status, activities: [activity] } });
   console.log('[RPC] ✓ Presence sent via raw WS fallback');
 }
@@ -162,31 +141,18 @@ function connect() {
 
   client.once('ready', async () => {
     console.log(`[Bot] ✓ Logged in as ${client.user.tag}`);
-
     if (!resolvedImage) {
       const result = await tryResolveImage();
       resolvedImage = result.image;
       resolvedAppId = result.appId;
     }
-
     await sendPresence();
     presenceInterval = setInterval(sendPresence, 20 * 60 * 1000);
   });
 
-  client.on('disconnect', () => {
-    console.warn('[Bot] Disconnected — reconnecting...');
-    scheduleReconnect(5000);
-  });
-
-  client.on('shardDisconnect', (_ev, id) => {
-    console.warn(`[Bot] Shard ${id} disconnected — reconnecting...`);
-    scheduleReconnect(5000);
-  });
-
-  client.on('error', (err) => {
-    console.error('[Bot] Error:', err.message);
-    scheduleReconnect(10000);
-  });
+  client.on('disconnect', () => { console.warn('[Bot] Disconnected — reconnecting...'); scheduleReconnect(5000); });
+  client.on('shardDisconnect', (_ev, id) => { console.warn(`[Bot] Shard ${id} disconnected`); scheduleReconnect(5000); });
+  client.on('error', (err) => { console.error('[Bot] Error:', err.message); scheduleReconnect(10000); });
 
   client.login(TOKEN).catch((err) => {
     console.error('[Bot] Login failed:', err.message);
@@ -195,13 +161,7 @@ function connect() {
   });
 }
 
-process.on('uncaughtException', (err) => {
-  console.error('[Process] Uncaught exception:', err.message);
-  scheduleReconnect(10000);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('[Process] Unhandled rejection:', reason);
-});
+process.on('uncaughtException', (err) => { console.error('[Process] Uncaught exception:', err.message); scheduleReconnect(10000); });
+process.on('unhandledRejection', (reason) => { console.error('[Process] Unhandled rejection:', reason); });
 
 connect();
